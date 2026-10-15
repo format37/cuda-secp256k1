@@ -5,9 +5,9 @@ with every operation checked against OpenSSL.
 
 It gives a GPU thread what it needs to do public-key math on its own:
 256-bit integers in registers, Montgomery multiplication, Jacobian point
-addition and doubling, a Montgomery-ladder scalar multiplication, and SHA-256,
-SHA-512, HMAC and PBKDF2 for the key-derivation steps around them. All of
-it is plain `__host__ __device__` code, so the same functions run and can be
+addition and doubling, a Montgomery-ladder scalar multiplication, and the hashing and key-derivation
+steps around them: SHA-256, SHA-512, HMAC, PBKDF2, BIP39 seeds and BIP32
+child keys. All of it is plain `__host__ __device__` code, so the same functions run and can be
 debugged on the CPU.
 
 ```cuda
@@ -59,6 +59,8 @@ cudaMemcpyToSymbol(c_group, &g, sizeof(g));
 | `ec.cuh` | `ec_group_t` (`ec_group_init_secp256k1`, or `ec_group_init` for another short-Weierstrass curve with cofactor 1), field helpers `fe_*`, `ec_point_t` (Jacobian, Montgomery form) and `ec_affine_t`, `ec_point_add`, `ec_point_dbl`, `ec_point_mul` (ladder), `ec_point_mul_vartime` (double-and-add), `ec_point_to_affine`, `ec_pubkey_create`, `ec_affine_to_bytes`, `ec_affine_is_on_curve` |
 | `hash.cuh` | SHA-256 and SHA-512, streaming (`sha256_init` / `sha256_update` / `sha256_final`, likewise `sha512_*`) and one-shot (`sha256`, `sha512`); HMAC for both (`hmac_sha256_init` / `_update` / `_final`, `hmac_sha256`, likewise `hmac_sha512_*`) |
 | `kdf.cuh` | `pbkdf2_hmac_sha256`, `pbkdf2_hmac_sha512` (RFC 8018, any output length) |
+| `bip39.cuh` | `bip39_seed` (mnemonic and passphrase to the 64-byte seed) |
+| `bip32.cuh` | `bip32_key_t`, `bip32_master`, `bip32_ckd_priv` (hardened and normal), `bip32_derive_path`, `bip32_pubkey`, `bip32_parse_path`; private derivation only, no xprv/xpub strings |
 
 Every function is safe to call with the result aliasing an input.
 
@@ -105,19 +107,39 @@ every result with OpenSSL on the host:
 - `test_pbkdf2`: PBKDF2 over both HMACs for password and salt lengths from
   empty to longer than a block, output lengths from 1 to 160 bytes and 1 to
   4096 iterations, on GPU and host, against `PKCS5_PBKDF2_HMAC()`.
+- `test_bip32`: BIP39 seeds from random mnemonics and passphrases against
+  `PKCS5_PBKDF2_HMAC()`; BIP32 master keys and random paths of depth 0 to 6
+  with hardened and normal indexes against a reference written on OpenSSL
+  primitives (`HMAC()`, `BN_mod_add()`, `EC_POINT_mul()`,
+  `EC_POINT_point2oct()`); the published BIP32 and BIP39 test vectors.
 
 `CUDA_SECP256K1_N` sets the batch size (default 4096) and
 `CUDA_SECP256K1_SEED` the random seed, so a failing input can be reproduced.
 
+## Examples
+
+- `derive_pubkey`: hex private keys in, compressed public keys out.
+- `mnemonic_to_key`: BIP39 mnemonics in (one per line on stdin, or as
+  arguments), private key and compressed public key at a BIP32 path out.
+  `-p` sets the passphrase and `-d` the path, default `m/44'/0'/0'/0/0`.
+  Mnemonics are used as given; there is no word-list or checksum validation.
+
+```sh
+echo "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about" \
+  | ./build/mnemonic_to_key -p TREZOR
+```
+
 ## Performance
 
-`bench_scalar_mul` derives one public key per thread. On an RTX 4090
-(CUDA 12.5, 262144 keys):
+`bench_scalar_mul` derives one public key per thread and `mnemonic_to_key`
+runs the whole BIP39 and BIP32 pipeline per thread. On an RTX 4090 (CUDA
+12.5, 262144 inputs):
 
-| Method | keys / s |
+| Workload | per second |
 |---|---|
-| `ec_point_mul` (Montgomery ladder) | ~480 000 |
-| `ec_point_mul_vartime` (double-and-add) | ~375 000 |
+| `ec_point_mul` (Montgomery ladder) | ~480 000 keys |
+| `ec_point_mul_vartime` (double-and-add) | ~375 000 keys |
+| `mnemonic_to_key`: BIP39 seed (2048 PBKDF2 rounds) and m/44'/0'/0'/0/0 (three scalar multiplications) | ~140 000 mnemonics |
 
 The arithmetic is generic multi-precision code (64-bit limbs, `__int128`
 products), not a hand-tuned secp256k1 field implementation, so there is room
