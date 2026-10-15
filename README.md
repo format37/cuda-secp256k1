@@ -5,7 +5,8 @@ with every operation checked against OpenSSL.
 
 It gives a GPU thread what it needs to do public-key math on its own:
 256-bit integers in registers, Montgomery multiplication, Jacobian point
-addition and doubling, and a Montgomery-ladder scalar multiplication. All of
+addition and doubling, a Montgomery-ladder scalar multiplication, and SHA-256
+with HMAC for the key-derivation steps around them. All of
 it is plain `__host__ __device__` code, so the same functions run and can be
 debugged on the CPU.
 
@@ -56,6 +57,7 @@ cudaMemcpyToSymbol(c_group, &g, sizeof(g));
 | `bn.cuh` | `bn_t`; `bn_add`, `bn_sub`, `bn_mul`, `bn_div` (Knuth D), `bn_mod`, `bn_nnmod`, shifts, `bn_cmp`, `bn_mod_inverse` (extended Euclid), the `*_quick` modular helpers, `bn_consttime_swap`, hex and byte conversion |
 | `mont.cuh` | `bn_mont_t` context (`bn_mont_init`), `bn_mont_mul`, `bn_to_mont`, `bn_from_mont`, `bn_mont_exp`, `bn_mod_exp_mont` |
 | `ec.cuh` | `ec_group_t` (`ec_group_init_secp256k1`, or `ec_group_init` for another short-Weierstrass curve with cofactor 1), field helpers `fe_*`, `ec_point_t` (Jacobian, Montgomery form) and `ec_affine_t`, `ec_point_add`, `ec_point_dbl`, `ec_point_mul` (ladder), `ec_point_mul_vartime` (double-and-add), `ec_point_to_affine`, `ec_pubkey_create`, `ec_affine_to_bytes`, `ec_affine_is_on_curve` |
+| `hash.cuh` | `sha256_ctx_t` with `sha256_init` / `sha256_update` / `sha256_final`, one-shot `sha256`; `hmac_sha256_ctx_t` with `hmac_sha256_init` / `_update` / `_final`, one-shot `hmac_sha256` |
 
 Every function is safe to call with the result aliasing an input.
 
@@ -87,6 +89,10 @@ every result with OpenSSL on the host:
   one projective, both projective, equal points, inverse points, infinity);
   public-key derivation and compressed encoding, all against
   `EC_POINT_mul` / `EC_POINT_add` / `EC_POINT_point2oct`.
+- `test_hash`: SHA-256 and HMAC-SHA256 for every message length from 0 to 321
+  bytes and random lengths up to 1 KiB, each computed one-shot, split across
+  two updates and one byte at a time, with keys from empty to longer than a
+  block, on both GPU and host, against `SHA256()` / `HMAC()`.
 
 `CUDA_SECP256K1_N` sets the batch size (default 4096) and
 `CUDA_SECP256K1_SEED` the random seed, so a failing input can be reproduced.
