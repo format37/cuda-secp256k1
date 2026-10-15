@@ -1,5 +1,5 @@
 /*
- * test_hash.cu - SHA-256, SHA-512 and their HMACs against OpenSSL.
+ * test_hash.cu - SHA-256, SHA-512, their HMACs, RIPEMD-160 and hash160 against OpenSSL.
  *
  * Every message is hashed on the GPU three ways (one shot, split into two
  * updates at a chosen point, and one byte per update), the HMAC two ways
@@ -8,6 +8,12 @@
  * cover every padding case of both block sizes (0..400 bytes exhaustively)
  * and key lengths cover short, block-sized and longer-than-block keys.
  */
+/*
+ * RIPEMD160() is a deprecated low-level call in OpenSSL 3, but unlike
+ * EVP_ripemd160() it works without loading the legacy provider.
+ */
+#define OPENSSL_SUPPRESS_DEPRECATED
+#include <openssl/ripemd.h>
 #include <openssl/hmac.h>
 #include <openssl/sha.h>
 
@@ -29,6 +35,8 @@ struct HashOut {
     uint8_t hmac256_digest[2][32]; /* one shot, split */
     uint8_t sha512_digest[3][64];
     uint8_t hmac512_digest[2][64];
+    uint8_t ripemd_digest[3][20];
+    uint8_t h160[20];
 };
 
 __host__ __device__ static void compute(const HashIn *in, HashOut *out)
@@ -71,6 +79,19 @@ __host__ __device__ static void compute(const HashIn *in, HashOut *out)
     hmac_sha512_update(&h512, m, s);
     hmac_sha512_update(&h512, m + s, n - s);
     hmac_sha512_final(&h512, out->hmac512_digest[1]);
+
+    ripemd160(m, n, out->ripemd_digest[0]);
+    ripemd160_ctx_t c160;
+    ripemd160_init(&c160);
+    ripemd160_update(&c160, m, s);
+    ripemd160_update(&c160, m + s, n - s);
+    ripemd160_final(&c160, out->ripemd_digest[1]);
+    ripemd160_init(&c160);
+    for (int i = 0; i < n; i++)
+        ripemd160_update(&c160, m + i, 1);
+    ripemd160_final(&c160, out->ripemd_digest[2]);
+
+    hash160(m, n, out->h160);
 }
 
 __global__ void hash_kernel(const HashIn *in, HashOut *out, int n)
@@ -163,6 +184,11 @@ static void known_answers(Stats &st)
     st.check(hex(out, 64) == "80b24263c7c1a3ebb71493c1dd7be8b49b46d1f41b4aeec1121b013783f8f352"
                              "6b56d037e05f2598bd0fd2215d6a1e5295e64f73f63f0aec8b915a985d786598",
              "hmac-sha512 rfc4231 #6 = %s", hex(out, 64).c_str());
+
+    ripemd160(abc, 0, out);
+    st.check(hex(out, 20) == "9c1185a5c5e9fc54612808977ee8f548b2258d31", "ripemd160(\"\") = %s", hex(out, 20).c_str());
+    ripemd160(abc, 3, out);
+    st.check(hex(out, 20) == "8eb208f7e05d987a9b044a8e98c6b087f15a0bfc", "ripemd160(\"abc\") = %s", hex(out, 20).c_str());
 }
 
 int main()
@@ -177,12 +203,14 @@ int main()
 
     for (size_t i = 0; i < in.size(); i++) {
         const HashIn &x = in[i];
-        uint8_t ref256[32], ref_h256[32], ref512[64], ref_h512[64];
+        uint8_t ref256[32], ref_h256[32], ref512[64], ref_h512[64], ref160[20], ref_h160[20];
         unsigned int len = 0;
         SHA256(x.msg, x.msg_len, ref256);
         HMAC(EVP_sha256(), x.key, x.key_len, x.msg, x.msg_len, ref_h256, &len);
         SHA512(x.msg, x.msg_len, ref512);
         HMAC(EVP_sha512(), x.key, x.key_len, x.msg, x.msg_len, ref_h512, &len);
+        RIPEMD160(x.msg, x.msg_len, ref160);
+        RIPEMD160(ref256, 32, ref_h160);
 
         HashOut host;
         compute(&x, &host);
@@ -202,6 +230,10 @@ int main()
             { "sha512 bytewise", out[i].sha512_digest[2], host.sha512_digest[2], ref512, 64 },
             { "hmac-sha512", out[i].hmac512_digest[0], host.hmac512_digest[0], ref_h512, 64 },
             { "hmac-sha512 split", out[i].hmac512_digest[1], host.hmac512_digest[1], ref_h512, 64 },
+            { "ripemd160", out[i].ripemd_digest[0], host.ripemd_digest[0], ref160, 20 },
+            { "ripemd160 split", out[i].ripemd_digest[1], host.ripemd_digest[1], ref160, 20 },
+            { "ripemd160 bytewise", out[i].ripemd_digest[2], host.ripemd_digest[2], ref160, 20 },
+            { "hash160", out[i].h160, host.h160, ref_h160, 20 },
         };
         for (const Check &c : checks) {
             st.check(memcmp(c.dev, c.ref, c.size) == 0, "[%zu] gpu %s msg_len=%d key_len=%d split=%d: %s != %s", i,

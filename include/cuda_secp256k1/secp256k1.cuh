@@ -1,4 +1,4 @@
-/* Umbrella header: big numbers, Montgomery arithmetic, secp256k1 curve ops, SHA-256/512, HMAC, PBKDF2, BIP39/BIP32. */
+/* Umbrella header: big numbers, Montgomery arithmetic, secp256k1 curve ops, SHA-256/512, HMAC, PBKDF2, BIP39/BIP32, RIPEMD-160 and address encodings. */
 #ifndef CUDA_SECP256K1_CUH
 #define CUDA_SECP256K1_CUH
 
@@ -9,5 +9,6 @@
 #include "kdf.cuh"
 #include "bip39.cuh"
 #include "bip32.cuh"
+#include "address.cuh"
 
 #endif

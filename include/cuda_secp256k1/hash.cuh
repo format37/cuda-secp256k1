@@ -1,5 +1,6 @@
 /*
- * hash.cuh - SHA-256 and SHA-512 (FIPS 180-4) with HMAC (RFC 2104).
+ * hash.cuh - SHA-256 and SHA-512 (FIPS 180-4) with HMAC (RFC 2104), RIPEMD-160,
+ * and the hash160 / sha256d compositions used by address formats.
  *
  * Plain __host__ __device__ code with no dynamic memory, so the same
  * functions run in a GPU thread and on the CPU. The streaming interface
@@ -478,6 +479,228 @@ HASH_HD void hmac_sha512(const uint8_t *key, size_t key_len, const uint8_t *data
     hmac_sha512_init(&c, key, key_len);
     hmac_sha512_update(&c, data, len);
     hmac_sha512_final(&c, out);
+}
+
+/* ====================================================================== */
+/* RIPEMD-160 (ISO/IEC 10118-3): little-endian, two parallel lines of 80  */
+/* steps, 160-bit output. Used for hash160 = RIPEMD-160(SHA-256(x)).       */
+/* ====================================================================== */
+
+#define RIPEMD160_BLOCK_SIZE 64
+#define RIPEMD160_DIGEST_SIZE 20
+
+typedef struct {
+    uint32_t h[5];
+    uint8_t buf[RIPEMD160_BLOCK_SIZE];
+    uint64_t len;
+} ripemd160_ctx_t;
+
+HASH_HD uint32_t ripemd160_rotl(uint32_t x, int n)
+{
+    return (x << n) | (x >> (32 - n));
+}
+
+HASH_HD uint32_t ripemd160_load_le32(const uint8_t *p)
+{
+    return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24;
+}
+
+HASH_HD void ripemd160_store_le32(uint8_t *p, uint32_t x)
+{
+    p[0] = (uint8_t)x;
+    p[1] = (uint8_t)(x >> 8);
+    p[2] = (uint8_t)(x >> 16);
+    p[3] = (uint8_t)(x >> 24);
+}
+
+/* Boolean function of round 0..4; the right line uses them in reverse order. */
+HASH_HD uint32_t ripemd160_f(int round, uint32_t x, uint32_t y, uint32_t z)
+{
+    switch (round) {
+    case 0:
+        return x ^ y ^ z;
+    case 1:
+        return (x & y) | (~x & z);
+    case 2:
+        return (x | ~y) ^ z;
+    case 3:
+        return (x & z) | (y & ~z);
+    default:
+        return x ^ (y | ~z);
+    }
+}
+
+HASH_HD uint32_t ripemd160_k_left(int round)
+{
+    switch (round) {
+    case 0:
+        return 0x00000000;
+    case 1:
+        return 0x5a827999;
+    case 2:
+        return 0x6ed9eba1;
+    case 3:
+        return 0x8f1bbcdc;
+    default:
+        return 0xa953fd4e;
+    }
+}
+
+HASH_HD uint32_t ripemd160_k_right(int round)
+{
+    switch (round) {
+    case 0:
+        return 0x50a28be6;
+    case 1:
+        return 0x5c4dd124;
+    case 2:
+        return 0x6d703ef3;
+    case 3:
+        return 0x7a6d76e9;
+    default:
+        return 0x00000000;
+    }
+}
+
+/* Absorb one 64-byte block into h. */
+HASH_HD void ripemd160_block(uint32_t h[5], const uint8_t block[RIPEMD160_BLOCK_SIZE])
+{
+    /*
+     * Message word index (r, r') and rotation amount (s, s') of each step,
+     * for the left and the right line. The step loop is fully unrolled, so
+     * these lookups and the x[] indexes become constants.
+     */
+    const uint8_t r[80] = { 0,  1, 2,  3,  4, 5,  6,  7,  8,  9, 10, 11, 12, 13, 14, 15, 7,  4,  13, 1,
+                            10, 6, 15, 3,  12, 0, 9,  5,  2,  14, 11, 8,  3,  10, 14, 4,  9,  15, 8,  1,
+                            2,  7, 0,  6,  13, 11, 5, 12, 1,  9,  11, 10, 0,  8,  12, 4,  13, 3,  7,  15,
+                            14, 5, 6,  2,  4,  0, 5,  9,  7,  12, 2,  10, 14, 1,  3,  8,  11, 6,  15, 13 };
+    const uint8_t rr[80] = { 5,  14, 7, 0,  9,  2,  11, 4,  13, 6,  15, 8,  1,  10, 3,  12, 6,  11, 3,  7,
+                             0,  13, 5, 10, 14, 15, 8,  12, 4,  9,  1,  2,  15, 5,  1,  3,  7,  14, 6,  9,
+                             11, 8,  12, 2, 10, 0,  4,  13, 8,  6,  4,  1,  3,  11, 15, 0,  5,  12, 2,  13,
+                             9,  7,  10, 14, 12, 15, 10, 4,  1,  5,  8,  7,  6,  2,  13, 14, 0,  3,  9,  11 };
+    const uint8_t s[80] = { 11, 14, 15, 12, 5,  8,  7,  9,  11, 13, 14, 15, 6,  7,  9,  8,  7,  6,  8,  13,
+                            11, 9,  7,  15, 7,  12, 15, 9,  11, 7,  13, 12, 11, 13, 6,  7,  14, 9,  13, 15,
+                            14, 8,  13, 6,  5,  12, 7,  5,  11, 12, 14, 15, 14, 15, 9,  8,  9,  14, 5,  6,
+                            8,  6,  5,  12, 9,  15, 5,  11, 6,  8,  13, 12, 5,  12, 13, 14, 11, 8,  5,  6 };
+    const uint8_t ss[80] = { 8,  9,  9,  11, 13, 15, 15, 5,  7,  7,  8,  11, 14, 14, 12, 6,  9,  13, 15, 7,
+                             12, 8,  9,  11, 7,  7,  12, 7,  6,  15, 13, 11, 9,  7,  15, 11, 8,  6,  6,  14,
+                             12, 13, 5,  14, 13, 13, 7,  5,  15, 5,  8,  11, 14, 14, 6,  14, 6,  9,  12, 9,
+                             12, 5,  15, 8,  8,  5,  12, 9,  12, 5,  14, 6,  8,  13, 6,  5,  15, 13, 11, 11 };
+    uint32_t x[16];
+    uint32_t al = h[0], bl = h[1], cl = h[2], dl = h[3], el = h[4];
+    uint32_t ar = al, br = bl, cr = cl, dr = dl, er = el;
+
+#pragma unroll
+    for (int i = 0; i < 16; i++)
+        x[i] = ripemd160_load_le32(block + 4 * i);
+
+#pragma unroll
+    for (int j = 0; j < 80; j++) {
+        int round = j / 16;
+        uint32_t t;
+
+        t = ripemd160_rotl(al + ripemd160_f(round, bl, cl, dl) + x[r[j]] + ripemd160_k_left(round), s[j]) + el;
+        al = el;
+        el = dl;
+        dl = ripemd160_rotl(cl, 10);
+        cl = bl;
+        bl = t;
+
+        t = ripemd160_rotl(ar + ripemd160_f(4 - round, br, cr, dr) + x[rr[j]] + ripemd160_k_right(round), ss[j]) + er;
+        ar = er;
+        er = dr;
+        dr = ripemd160_rotl(cr, 10);
+        cr = br;
+        br = t;
+    }
+
+    uint32_t t = h[1] + cl + dr;
+    h[1] = h[2] + dl + er;
+    h[2] = h[3] + el + ar;
+    h[3] = h[4] + al + br;
+    h[4] = h[0] + bl + cr;
+    h[0] = t;
+}
+
+HASH_HD void ripemd160_init(ripemd160_ctx_t *c)
+{
+    c->h[0] = 0x67452301;
+    c->h[1] = 0xefcdab89;
+    c->h[2] = 0x98badcfe;
+    c->h[3] = 0x10325476;
+    c->h[4] = 0xc3d2e1f0;
+    c->len = 0;
+}
+
+HASH_HD void ripemd160_update(ripemd160_ctx_t *c, const uint8_t *data, size_t len)
+{
+    size_t have = (size_t)(c->len % RIPEMD160_BLOCK_SIZE);
+    c->len += len;
+
+    if (have) {
+        size_t need = RIPEMD160_BLOCK_SIZE - have;
+        if (len < need) {
+            memcpy(c->buf + have, data, len);
+            return;
+        }
+        memcpy(c->buf + have, data, need);
+        ripemd160_block(c->h, c->buf);
+        data += need;
+        len -= need;
+    }
+
+    while (len >= RIPEMD160_BLOCK_SIZE) {
+        ripemd160_block(c->h, data);
+        data += RIPEMD160_BLOCK_SIZE;
+        len -= RIPEMD160_BLOCK_SIZE;
+    }
+
+    if (len)
+        memcpy(c->buf, data, len);
+}
+
+HASH_HD void ripemd160_final(ripemd160_ctx_t *c, uint8_t out[RIPEMD160_DIGEST_SIZE])
+{
+    size_t have = (size_t)(c->len % RIPEMD160_BLOCK_SIZE);
+    uint64_t bits = c->len * 8;
+
+    /* Padding: 0x80, zeros, then the length in bits as 8 little-endian bytes. */
+    c->buf[have++] = 0x80;
+    if (have > RIPEMD160_BLOCK_SIZE - 8) {
+        memset(c->buf + have, 0, RIPEMD160_BLOCK_SIZE - have);
+        ripemd160_block(c->h, c->buf);
+        have = 0;
+    }
+    memset(c->buf + have, 0, RIPEMD160_BLOCK_SIZE - 8 - have);
+    ripemd160_store_le32(c->buf + RIPEMD160_BLOCK_SIZE - 8, (uint32_t)bits);
+    ripemd160_store_le32(c->buf + RIPEMD160_BLOCK_SIZE - 4, (uint32_t)(bits >> 32));
+    ripemd160_block(c->h, c->buf);
+
+    for (int i = 0; i < 5; i++)
+        ripemd160_store_le32(out + 4 * i, c->h[i]);
+}
+
+HASH_HD void ripemd160(const uint8_t *data, size_t len, uint8_t out[RIPEMD160_DIGEST_SIZE])
+{
+    ripemd160_ctx_t c;
+    ripemd160_init(&c);
+    ripemd160_update(&c, data, len);
+    ripemd160_final(&c, out);
+}
+
+/* hash160(x) = RIPEMD-160(SHA-256(x)), the hash behind Bitcoin and Avalanche addresses. */
+HASH_HD void hash160(const uint8_t *data, size_t len, uint8_t out[RIPEMD160_DIGEST_SIZE])
+{
+    uint8_t h[SHA256_DIGEST_SIZE];
+    sha256(data, len, h);
+    ripemd160(h, sizeof(h), out);
+}
+
+/* sha256d(x) = SHA-256(SHA-256(x)), used for Base58Check checksums. */
+HASH_HD void sha256d(const uint8_t *data, size_t len, uint8_t out[SHA256_DIGEST_SIZE])
+{
+    sha256(data, len, out);
+    sha256(out, SHA256_DIGEST_SIZE, out);
 }
 
 #endif

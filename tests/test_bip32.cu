@@ -7,7 +7,8 @@
  * (hardened and normal indexes, depth 0 to 6) are derived on the GPU and on
  * the host and compared with that reference. Half of the seeds come from
  * random mnemonics through bip39_seed(), checked against PKCS5_PBKDF2_HMAC().
- * The published BIP32 and BIP39 test vectors are checked first.
+ * The published BIP32 and BIP39 test vectors and the first BIP44 and BIP84
+ * addresses of the reference mnemonic are checked first.
  */
 #include <openssl/evp.h>
 #include <openssl/hmac.h>
@@ -213,6 +214,23 @@ static void known_answers(Stats &st, const ec_group_t *g)
     st.check(hex(seed, 64) == "c55257c360c07c72029aebc1b53c05ed0362ada38ead3e3e9efa3708e5349553"
                               "1f09a6987599d18264c1e1c92f2cf141630c7a3c4ab7c81b2f001698e7463b04",
              "bip39 seed: %s", hex(seed, 64).c_str());
+
+    /* End to end: the same mnemonic without passphrase, first BIP44 and BIP84 addresses. */
+    char addr[BECH32_MAX_LEN + 1];
+    uint8_t pubkey[33];
+    uint32_t idx[MAX_DEPTH];
+    bip32_key_t k;
+    bip39_seed(m, strlen(m), "", 0, seed);
+    bip32_master(g, &k, seed, 64);
+    bip32_derive_path(g, &k, idx, bip32_parse_path("m/44'/0'/0'/0/0", idx, MAX_DEPTH));
+    bip32_pubkey(g, &k, pubkey);
+    address_p2pkh(0x00, pubkey, addr, sizeof(addr));
+    st.check(!strcmp(addr, "1LqBGSKuX5yYUonjxT5qGfpUsXKYYWeabA"), "bip44 address: %s", addr);
+    bip32_master(g, &k, seed, 64);
+    bip32_derive_path(g, &k, idx, bip32_parse_path("m/84'/0'/0'/0/0", idx, MAX_DEPTH));
+    bip32_pubkey(g, &k, pubkey);
+    address_p2wpkh("bc", pubkey, addr, sizeof(addr));
+    st.check(!strcmp(addr, "bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu"), "bip84 address: %s", addr);
 
     /* path parser */
     uint32_t p[MAX_DEPTH];
