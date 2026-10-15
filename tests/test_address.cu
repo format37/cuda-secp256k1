@@ -272,7 +272,7 @@ int main()
     std::vector<AddrIn> in = make_inputs(o);
     std::vector<AddrOut> out = run_on_device<AddrIn, AddrOut>(in, [](const AddrIn *d_in, AddrOut *d_out, int n) {
         addr_kernel<<<(n + 127) / 128, 128>>>(d_in, d_out, n);
-    });
+    }, [](const AddrIn *x, AddrOut *o) { compute(x, o); });
 
     for (size_t i = 0; i < in.size(); i++) {
         const AddrIn &x = in[i];

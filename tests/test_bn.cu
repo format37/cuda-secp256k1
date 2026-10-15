@@ -14,12 +14,9 @@ struct BnOut {
     int cmp, ucmp, bits, hex_ok, bytes_ok;
 };
 
-__global__ void bn_kernel(const BnIn *in, BnOut *out, int n, bn_t p)
+__host__ __device__ static void compute(const BnIn *inp, BnOut *out, const bn_t &p)
 {
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= n)
-        return;
-    const bn_t a = in[i].a, b = in[i].b;
+    const bn_t a = inp->a, b = inp->b;
     BnOut o;
     memset(&o, 0, sizeof(o));
 
@@ -29,8 +26,8 @@ __global__ void bn_kernel(const BnIn *in, BnOut *out, int n, bn_t p)
     o.div_ok = bn_div(&o.q, &o.r, &a, &b);
     if (o.div_ok)
         bn_nnmod(&o.nnmod, &a, &b);
-    o.lsh_ok = bn_lshift(&o.lsh, &a, in[i].shift);
-    bn_rshift(&o.rsh, &a, in[i].shift);
+    o.lsh_ok = bn_lshift(&o.lsh, &a, inp->shift);
+    bn_rshift(&o.rsh, &a, inp->shift);
     bn_lshift1(&o.lsh1, &a);
     bn_rshift1(&o.rsh1, &a);
     o.inv_p_ok = bn_mod_inverse(&o.inv_p, &a, &p);
@@ -46,7 +43,7 @@ __global__ void bn_kernel(const BnIn *in, BnOut *out, int n, bn_t p)
     bn_mod_add_quick(&o.qadd, &ap, &bp, &p);
     bn_mod_sub_quick(&o.qsub, &ap, &bp, &p);
     bn_mod_lshift1_quick(&o.qlsh1, &ap, &p);
-    bn_mod_lshift_quick(&o.qlsh, &ap, in[i].shift % 8, &p);
+    bn_mod_lshift_quick(&o.qlsh, &ap, inp->shift % 8, &p);
 
     /* conversions must round-trip */
     char hexbuf[BN_WORDS * 16 + 2];
@@ -80,8 +77,16 @@ __global__ void bn_kernel(const BnIn *in, BnOut *out, int n, bn_t p)
         o.hex_ok &= bn_cmp(&t, &o.q) == 0 && bn_cmp(&t2, &o.r) == 0;
     }
 
-    out[i] = o;
+    *out = o;
 }
+
+__global__ void bn_kernel(const BnIn *in, BnOut *out, int n, bn_t p)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n)
+        compute(&in[i], &out[i], p);
+}
+
 
 int main()
 {
@@ -117,7 +122,7 @@ int main()
 
     std::vector<BnOut> out = run_on_device<BnIn, BnOut>(in, [&](BnIn *d_in, BnOut *d_out, int n) {
         bn_kernel<<<(n + 127) / 128, 128>>>(d_in, d_out, n, p);
-    });
+    }, [&](const BnIn *x, BnOut *o) { compute(x, o, p); });
 
     BIGNUM *a = BN_new(), *b = BN_new(), *P = BN_new(), *x = BN_new(), *y = BN_new(), *z = BN_new();
     to_ossl(P, &p);

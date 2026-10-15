@@ -1,5 +1,7 @@
 # cuda-secp256k1
 
+[![CI](https://github.com/format37/cuda-secp256k1/actions/workflows/ci.yml/badge.svg)](https://github.com/format37/cuda-secp256k1/actions/workflows/ci.yml)
+
 Big-number and secp256k1 elliptic-curve arithmetic for CUDA, header-only,
 with every operation checked against OpenSSL.
 
@@ -121,6 +123,10 @@ every result with OpenSSL on the host:
 
 `CUDA_SECP256K1_N` sets the batch size (default 4096) and
 `CUDA_SECP256K1_SEED` the random seed, so a failing input can be reproduced.
+`CUDA_SECP256K1_HOST_ONLY=1` runs the kernels' work on the CPU with the same
+code, which is how CI runs the suite on machines without a GPU.
+
+See `CONTRIBUTING.md` for how to add a function and its test.
 
 ## Examples
 

@@ -17,14 +17,10 @@ struct EcOut {
 
 __constant__ ec_group_t c_group;
 
-__global__ void ec_kernel(const EcIn *in, EcOut *out, int n)
+__host__ __device__ static void compute(const ec_group_t *g, const EcIn *inp, EcOut *out)
 {
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= n)
-        return;
-    const ec_group_t *g = &c_group;
-    const bn_t k = in[i].k;
-    const ec_affine_t P = in[i].P, Q = in[i].Q;
+    const bn_t k = inp->k;
+    const ec_affine_t P = inp->P, Q = inp->Q;
     EcOut o;
     memset(&o, 0, sizeof(o));
     ec_point_t t, pj, qj, A, B, C;
@@ -79,8 +75,16 @@ __global__ void ec_kernel(const EcIn *in, EcOut *out, int n)
     o.pub_ok = ec_pubkey_create(g, &o.pub, &k);
     o.on_curve = ec_affine_is_on_curve(g, &P);
     o.comp_len = ec_affine_to_bytes(&P, o.comp, 1);
-    out[i] = o;
+    *out = o;
 }
+
+__global__ void ec_kernel(const EcIn *in, EcOut *out, int n)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n)
+        compute(&c_group, &in[i], &out[i]);
+}
+
 
 /* OpenSSL helpers */
 static EC_POINT *point_from_affine(const Ossl &o, const ec_affine_t *a)
@@ -155,7 +159,8 @@ int main()
         fprintf(stderr, "group init failed\n");
         return 2;
     }
-    CUDA_CHECK(cudaMemcpyToSymbol(c_group, &group, sizeof(group)));
+    if (have_cuda_device())
+        CUDA_CHECK(cudaMemcpyToSymbol(c_group, &group, sizeof(group)));
 
     bn_t order = from_hex("fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141");
     bn_t one = from_hex("1");
@@ -207,7 +212,7 @@ int main()
 
     std::vector<EcOut> out = run_on_device<EcIn, EcOut>(in, [&](EcIn *d_in, EcOut *d_out, int n) {
         ec_kernel<<<(n + 63) / 64, 64>>>(d_in, d_out, n);
-    });
+    }, [&](const EcIn *x, EcOut *o) { compute(&group, x, o); });
 
     BIGNUM *k = BN_new(), *ord = BN_new();
     to_ossl(ord, &order);

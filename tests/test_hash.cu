@@ -199,7 +199,7 @@ int main()
     std::vector<HashIn> in = make_inputs();
     std::vector<HashOut> out = run_on_device<HashIn, HashOut>(in, [](const HashIn *d_in, HashOut *d_out, int n) {
         hash_kernel<<<(n + 127) / 128, 128>>>(d_in, d_out, n);
-    });
+    }, [](const HashIn *x, HashOut *o) { compute(x, o); });
 
     for (size_t i = 0; i < in.size(); i++) {
         const HashIn &x = in[i];

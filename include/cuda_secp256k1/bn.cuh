@@ -72,6 +72,13 @@ BN_HD void bn_normalize(bn_t *a)
         a->neg = 0;
 }
 
+/* Zero the words from index `from` upwards. The clamp tells gcc the range is bounded, which avoids a bogus overflow warning. */
+BN_HD void bn_clear_from(bn_t *r, int from)
+{
+    for (int i = from < 0 ? 0 : from; i < BN_WORDS; i++)
+        r->d[i] = 0;
+}
+
 BN_HD int bn_is_zero(const bn_t *a) { return a->top == 0; }
 BN_HD int bn_is_one(const bn_t *a) { return a->top == 1 && a->d[0] == 1 && !a->neg; }
 BN_HD int bn_is_odd(const bn_t *a) { return a->top > 0 && (a->d[0] & 1); }
@@ -175,8 +182,7 @@ BN_HD int bn_uadd(bn_t *r, const bn_t *a, const bn_t *b)
             return 0;
         r->d[top++] = carry;
     }
-    for (int i = top; i < BN_WORDS; i++)
-        r->d[i] = 0;
+    bn_clear_from(r, top);
     r->top = top;
     r->neg = 0;
     return 1;
@@ -193,8 +199,7 @@ BN_HD void bn_usub(bn_t *r, const bn_t *a, const bn_t *b)
         r->d[i] = (bn_word)s;
         borrow = (bn_word)(s >> BN_WORD_BITS) & 1;
     }
-    for (int i = top; i < BN_WORDS; i++)
-        r->d[i] = 0;
+    bn_clear_from(r, top);
     r->top = top;
     r->neg = 0;
     bn_normalize(r);
@@ -279,8 +284,7 @@ BN_HD int bn_lshift1(bn_t *r, const bn_t *a)
             return 0;
         r->d[top++] = carry;
     }
-    for (int i = top; i < BN_WORDS; i++)
-        r->d[i] = 0;
+    bn_clear_from(r, top);
     r->top = top;
     r->neg = a->neg;
     return 1;
@@ -297,8 +301,7 @@ BN_HD void bn_rshift1(bn_t *r, const bn_t *a)
         r->d[i] = (w >> 1) | (carry << (BN_WORD_BITS - 1));
         carry = w & 1;
     }
-    for (int i = top; i < BN_WORDS; i++)
-        r->d[i] = 0;
+    bn_clear_from(r, top);
     r->top = top;
     r->neg = neg;
     bn_normalize(r);

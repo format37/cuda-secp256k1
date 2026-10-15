@@ -135,7 +135,7 @@ int main()
     std::vector<KdfIn> in = make_inputs();
     std::vector<KdfOut> out = run_on_device<KdfIn, KdfOut>(in, [](const KdfIn *d_in, KdfOut *d_out, int n) {
         kdf_kernel<<<(n + 127) / 128, 128>>>(d_in, d_out, n);
-    });
+    }, [](const KdfIn *x, KdfOut *o) { compute(x, o); });
 
     for (size_t i = 0; i < in.size(); i++) {
         const KdfIn &x = in[i];

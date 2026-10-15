@@ -5,7 +5,9 @@
  * result against OpenSSL on the host. The input batch mixes hand-picked edge
  * cases with values from a seeded generator, so a failure is reproducible:
  * set CUDA_SECP256K1_SEED to change the seed and CUDA_SECP256K1_N to change
- * the batch size.
+ * the batch size. Without a GPU (or with CUDA_SECP256K1_HOST_ONLY=1) the
+ * kernel's work is done on the host by the same __host__ __device__ code,
+ * so the suite also runs on a machine without CUDA hardware, such as CI.
  */
 #ifndef CUDA_SECP256K1_TEST_UTIL_H
 #define CUDA_SECP256K1_TEST_UTIL_H
@@ -242,13 +244,35 @@ struct Ossl {
     }
 };
 
-/* Upload a host vector, run a kernel through `launch`, download the result. */
-template <typename In, typename Out, typename Launch>
-static std::vector<Out> run_on_device(const std::vector<In> &in, Launch launch)
+/* True when a CUDA device is usable; false on a machine without one or with CUDA_SECP256K1_HOST_ONLY=1. */
+static bool have_cuda_device()
 {
+    static int cached = -1;
+    if (cached < 0) {
+        int count = 0;
+        cached = !env_long("CUDA_SECP256K1_HOST_ONLY", 0) && cudaGetDeviceCount(&count) == cudaSuccess && count > 0;
+        if (!cached)
+            printf("no CUDA device in use: running the kernel's work on the host\n");
+    }
+    return cached != 0;
+}
+
+/*
+ * Upload a host vector, run a kernel through `launch`, download the result.
+ * Without a device, `host_fn(&in[i], &out[i])` does the same work on the host.
+ */
+template <typename In, typename Out, typename Launch, typename HostFn>
+static std::vector<Out> run_on_device(const std::vector<In> &in, Launch launch, HostFn host_fn)
+{
+    size_t n = in.size();
+    if (!have_cuda_device()) {
+        std::vector<Out> out(n);
+        for (size_t i = 0; i < n; i++)
+            host_fn(&in[i], &out[i]);
+        return out;
+    }
     In *d_in = NULL;
     Out *d_out = NULL;
-    size_t n = in.size();
     CUDA_CHECK(cudaMalloc(&d_in, n * sizeof(In)));
     CUDA_CHECK(cudaMalloc(&d_out, n * sizeof(Out)));
     CUDA_CHECK(cudaMemcpy(d_in, in.data(), n * sizeof(In), cudaMemcpyHostToDevice));

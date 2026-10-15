@@ -11,24 +11,29 @@ struct MontOut {
     bn_t am, bm, back, prod, prod_back, powm;
 };
 
-__global__ void mont_kernel(const MontIn *in, MontOut *out, int n)
+__host__ __device__ static void compute(const MontIn *inp, MontOut *out)
 {
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= n)
-        return;
     MontOut o;
     memset(&o, 0, sizeof(o));
-    o.ctx_ok = bn_mont_init(&o.ctx, &in[i].m);
+    o.ctx_ok = bn_mont_init(&o.ctx, &inp->m);
     if (o.ctx_ok) {
-        bn_to_mont(&o.am, &in[i].a, &o.ctx);
-        bn_to_mont(&o.bm, &in[i].b, &o.ctx);
+        bn_to_mont(&o.am, &inp->a, &o.ctx);
+        bn_to_mont(&o.bm, &inp->b, &o.ctx);
         bn_from_mont(&o.back, &o.am, &o.ctx);
         bn_mont_mul(&o.prod, &o.am, &o.bm, &o.ctx);
         bn_from_mont(&o.prod_back, &o.prod, &o.ctx);
-        bn_mod_exp_mont(&o.powm, &in[i].a, &in[i].e, &o.ctx);
+        bn_mod_exp_mont(&o.powm, &inp->a, &inp->e, &o.ctx);
     }
-    out[i] = o;
+    *out = o;
 }
+
+__global__ void mont_kernel(const MontIn *in, MontOut *out, int n)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n)
+        compute(&in[i], &out[i]);
+}
+
 
 int main()
 {
@@ -68,7 +73,7 @@ int main()
 
     std::vector<MontOut> out = run_on_device<MontIn, MontOut>(in, [&](MontIn *d_in, MontOut *d_out, int n) {
         mont_kernel<<<(n + 127) / 128, 128>>>(d_in, d_out, n);
-    });
+    }, [](const MontIn *x, MontOut *o) { compute(x, o); });
 
     BIGNUM *m = BN_new(), *a = BN_new(), *b = BN_new(), *e = BN_new();
     BIGNUM *x = BN_new(), *y = BN_new(), *t = BN_new(), *R = BN_new();

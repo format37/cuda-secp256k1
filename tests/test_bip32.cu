@@ -297,14 +297,15 @@ int main()
     Ossl o;
     ec_group_t group;
     ec_group_init_secp256k1(&group);
-    CUDA_CHECK(cudaMemcpyToSymbol(c_group, &group, sizeof(group)));
+    if (have_cuda_device())
+        CUDA_CHECK(cudaMemcpyToSymbol(c_group, &group, sizeof(group)));
 
     known_answers(st, &group);
 
     std::vector<HdIn> in = make_inputs();
     std::vector<HdOut> out = run_on_device<HdIn, HdOut>(in, [](const HdIn *d_in, HdOut *d_out, int n) {
         hd_kernel<<<(n + 127) / 128, 128>>>(d_in, d_out, n);
-    });
+    }, [&](const HdIn *x, HdOut *o) { compute(&group, x, o); });
 
     for (size_t i = 0; i < in.size(); i++) {
         const HdIn &x = in[i];
