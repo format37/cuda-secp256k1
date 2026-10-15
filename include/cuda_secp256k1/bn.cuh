@@ -240,22 +240,28 @@ BN_HD int bn_sub(bn_t *r, const bn_t *a, const bn_t *b)
     return bn_add(r, a, &nb);
 }
 
-/* r = a * b. Returns 0 if a->top + b->top > BN_WORDS (r is left unchanged). */
+/* r = a * b. Returns 0 if the product does not fit in BN_WORDS words (r is left unchanged). */
 BN_HD int bn_mul(bn_t *r, const bn_t *a, const bn_t *b)
 {
     if (a->top == 0 || b->top == 0) {
         bn_zero(r);
         return 1;
     }
-    if (a->top + b->top > BN_WORDS)
+    /* The product has a->top + b->top words or one fewer, so one spare word
+     * is enough to find out whether it fits. */
+    if (a->top + b->top > BN_WORDS + 1)
         return 0;
-    bn_word t[BN_WORDS];
-    for (int i = 0; i < BN_WORDS; i++)
+    bn_word t[BN_WORDS + 1];
+    for (int i = 0; i <= BN_WORDS; i++)
         t[i] = 0;
     for (int i = 0; i < a->top; i++)
         t[i + b->top] = bn_mul_add_words(&t[i], b->d, b->top, a->d[i]);
+    if (t[BN_WORDS] != 0)
+        return 0;
     int neg = a->neg ^ b->neg;
     int top = a->top + b->top;
+    if (top > BN_WORDS)
+        top = BN_WORDS;
     for (int i = 0; i < BN_WORDS; i++)
         r->d[i] = t[i];
     r->top = top;

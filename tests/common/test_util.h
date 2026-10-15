@@ -164,6 +164,30 @@ static bn_t rand_upto(int max_bits)
     return rand_bits((int)(rng()() % (uint64_t)(max_bits + 1)));
 }
 
+/* 2^k, for 0 <= k < BN_MAX_BITS. */
+static bn_t power_of_two(int k)
+{
+    bn_t r;
+    bn_zero(&r);
+    r.d[k / 64] = (bn_word)1 << (k % 64);
+    r.top = k / 64 + 1;
+    return r;
+}
+
+/* 2^k - 1, all of the low k bits set, for 0 <= k <= BN_MAX_BITS. */
+static bn_t all_ones(int k)
+{
+    bn_t r;
+    bn_zero(&r);
+    for (int i = 0; i < k / 64; i++)
+        r.d[i] = ~(bn_word)0;
+    if (k % 64)
+        r.d[k / 64] = ~(bn_word)0 >> (64 - k % 64);
+    r.top = BN_WORDS;
+    bn_normalize(&r);
+    return r;
+}
+
 /* Uniform random value in [0, n). */
 static bn_t rand_below(const bn_t *n)
 {
@@ -213,6 +237,11 @@ static std::vector<bn_t> edge_values()
     };
     for (const char *h : hexes)
         v.push_back(from_hex(h));
+    /* Word boundaries above 256 bits, up to the full width of a bn_t. */
+    for (int k : {256, 320, 448, BN_MAX_BITS - 1})
+        v.push_back(power_of_two(k));
+    for (int k : {320, 384, 448, BN_MAX_BITS})
+        v.push_back(all_ones(k));
     return v;
 }
 

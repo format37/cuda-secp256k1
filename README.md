@@ -91,8 +91,9 @@ every result with OpenSSL on the host:
 
 - `test_bn`: add, sub, mul, div/mod, nnmod, shifts, modular inverse, the
   `*_quick` helpers and conversions, on all pairs of edge values (0, 1, word
-  boundaries, `p`, `n`, 2^256 - 1, ...) with every sign combination, plus
-  random operands of up to 512 bits.
+  boundaries up to the full 512 bits, `p`, `n`, 2^256 - 1, ...) with every
+  sign combination, divisions built to reach the rare correction steps of
+  long division, plus random operands of up to 512 bits, divisors included.
 - `test_mont`: context setup (`n0`, `R mod n`, `R^2 mod n`), conversions,
   Montgomery products and exponentiation against `BN_MONT_CTX` /
   `BN_mod_mul_montgomery` / `BN_mod_exp`, for `p`, `n`, moduli of 1 to 4 words

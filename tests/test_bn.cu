@@ -10,7 +10,7 @@ struct BnOut {
     bn_t add, sub, mul, q, r, nnmod, lsh, rsh, lsh1, rsh1;
     bn_t inv_p, inv_b;
     bn_t qadd, qsub, qlsh1, qlsh;
-    int mul_ok, div_ok, lsh_ok, inv_p_ok, inv_b_ok;
+    int add_ok, sub_ok, mul_ok, div_ok, lsh_ok, inv_p_ok, inv_b_ok;
     int cmp, ucmp, bits, hex_ok, bytes_ok;
 };
 
@@ -20,8 +20,8 @@ __host__ __device__ static void compute(const BnIn *inp, BnOut *out, const bn_t 
     BnOut o;
     memset(&o, 0, sizeof(o));
 
-    bn_add(&o.add, &a, &b);
-    bn_sub(&o.sub, &a, &b);
+    o.add_ok = bn_add(&o.add, &a, &b);
+    o.sub_ok = bn_sub(&o.sub, &a, &b);
     o.mul_ok = bn_mul(&o.mul, &a, &b);
     o.div_ok = bn_div(&o.q, &o.r, &a, &b);
     if (o.div_ok)
@@ -57,14 +57,18 @@ __host__ __device__ static void compute(const BnIn *inp, BnOut *out, const bn_t 
 
     /* in-place forms must give the same answers */
     bn_t t = a;
-    bn_add(&t, &t, &b);
-    o.hex_ok &= bn_cmp(&t, &o.add) == 0;
-    t = a;
-    bn_sub(&t, &t, &b);
-    o.hex_ok &= bn_cmp(&t, &o.sub) == 0;
-    t = b;
-    bn_sub(&t, &a, &t);
-    o.hex_ok &= bn_cmp(&t, &o.sub) == 0;
+    if (o.add_ok) {
+        bn_add(&t, &t, &b);
+        o.hex_ok &= bn_cmp(&t, &o.add) == 0;
+    }
+    if (o.sub_ok) {
+        t = a;
+        bn_sub(&t, &t, &b);
+        o.hex_ok &= bn_cmp(&t, &o.sub) == 0;
+        t = b;
+        bn_sub(&t, &a, &t);
+        o.hex_ok &= bn_cmp(&t, &o.sub) == 0;
+    }
     if (o.mul_ok) {
         t = a;
         bn_mul(&t, &t, &b);
@@ -78,6 +82,43 @@ __host__ __device__ static void compute(const BnIn *inp, BnOut *out, const bn_t 
     }
 
     *out = o;
+}
+
+/*
+ * Divisions whose quotient-word estimate in algorithm D takes a branch that
+ * random inputs almost never reach. For each divisor length n, the top words
+ * of the dividend and divisor make the first estimate either one too large,
+ * so the divisor has to be added back, or equal to the word base 2^64, with
+ * and without the remainder overflowing a word while it is corrected.
+ */
+static void add_division_corner_cases(std::vector<BnIn> &in)
+{
+    const bn_word H = (bn_word)1 << 63, M = ~(bn_word)0;
+    struct Shape {
+        bn_word a_top, a_next, b_top, b_next, b_low;
+    } shapes[] = {
+        {H - 1, H, H, 0, 1}, /* estimate one too large: add back */
+        {H, H - 1, H, H, 0}, /* estimate equals 2^64 */
+        {M, 1, M, M, 0},     /* estimate equals 2^64 and the remainder overflows */
+    };
+    for (int n = 2; n < BN_WORDS; n++)
+        for (const Shape &sh : shapes)
+            for (int signs = 0; signs < 4; signs++) {
+                BnIn x;
+                bn_zero(&x.a);
+                bn_zero(&x.b);
+                x.a.d[n] = sh.a_top;
+                x.a.d[n - 1] = sh.a_next;
+                x.a.top = n + 1;
+                x.b.d[n - 1] = sh.b_top;
+                x.b.d[n - 2] |= sh.b_next;
+                x.b.d[0] |= sh.b_low;
+                x.b.top = n;
+                x.a.neg = signs & 1;
+                x.b.neg = (signs >> 1) & 1;
+                x.shift = 0;
+                in.push_back(x);
+            }
 }
 
 __global__ void bn_kernel(const BnIn *in, BnOut *out, int n, bn_t p)
@@ -94,7 +135,8 @@ int main()
     Stats st;
     bn_t p = from_hex("fffffffffffffffffffffffffffffffffffffffffffffffffffffffefffffc2f");
 
-    /* Inputs: every pair of edge values with every sign combination, then random pairs. */
+    /* Inputs: every pair of edge values with every sign combination, division
+     * corner cases, then random pairs. */
     std::vector<BnIn> in;
     std::vector<bn_t> edges = edge_values();
     for (const bn_t &a : edges)
@@ -105,18 +147,30 @@ int main()
                 x.b = b;
                 x.a.neg = (signs & 1) && a.top;
                 x.b.neg = (signs & 2) && b.top;
-                x.shift = (int)(rng()() % 520);
+                x.shift = (int)(rng()() % (BN_MAX_BITS + 8));
                 in.push_back(x);
             }
+    add_division_corner_cases(in);
+    const int half = BN_MAX_BITS / 2;
     int nrand = batch_size();
     for (int i = 0; i < nrand; i++) {
         BnIn x;
-        int abits = (i % 4 == 0) ? 512 : 256; /* some dividends that use all the words */
-        x.a = rand_upto(abits);
-        x.b = rand_upto(256);
+        if (i % 4 == 0) {
+            /* dividend that may use all the words */
+            x.a = rand_upto(BN_MAX_BITS);
+            x.b = rand_upto(half);
+        } else if (i % 4 == 1) {
+            /* divisor longer than half the width, dividend at least as long */
+            int bbits = half + 1 + (int)(rng()() % half);
+            x.b = rand_bits(bbits);
+            x.a = rand_bits(bbits + (int)(rng()() % (BN_MAX_BITS - bbits + 1)));
+        } else {
+            x.a = rand_upto(half);
+            x.b = rand_upto(half);
+        }
         x.a.neg = (rng()() & 1) && x.a.top;
         x.b.neg = (rng()() & 1) && x.b.top;
-        x.shift = (int)(rng()() % 520);
+        x.shift = (int)(rng()() % (BN_MAX_BITS + 8));
         in.push_back(x);
     }
 
@@ -134,16 +188,21 @@ int main()
         const char *A = ha.c_str(), *B = hb.c_str();
 
         BN_add(x, a, b);
-        st.check(equals(&o.add, x), "add %s + %s: got %s want %s", A, B, hex(&o.add).c_str(), hex(x).c_str());
+        bool fits = BN_num_bits(x) <= BN_MAX_BITS;
+        st.check(o.add_ok == (int)fits, "add_ok %s + %s: got %d", A, B, o.add_ok);
+        if (o.add_ok)
+            st.check(equals(&o.add, x), "add %s + %s: got %s want %s", A, B, hex(&o.add).c_str(), hex(x).c_str());
         BN_sub(x, a, b);
-        st.check(equals(&o.sub, x), "sub %s - %s: got %s want %s", A, B, hex(&o.sub).c_str(), hex(x).c_str());
+        fits = BN_num_bits(x) <= BN_MAX_BITS;
+        st.check(o.sub_ok == (int)fits, "sub_ok %s - %s: got %d", A, B, o.sub_ok);
+        if (o.sub_ok)
+            st.check(equals(&o.sub, x), "sub %s - %s: got %s want %s", A, B, hex(&o.sub).c_str(), hex(x).c_str());
 
-        bool mul_fits = in[i].a.top + in[i].b.top <= BN_WORDS;
-        st.check(o.mul_ok == (int)mul_fits, "mul_ok %s * %s: got %d", A, B, o.mul_ok);
-        if (o.mul_ok) {
-            BN_mul(x, a, b, ossl.ctx);
+        BN_mul(x, a, b, ossl.ctx);
+        fits = BN_num_bits(x) <= BN_MAX_BITS;
+        st.check(o.mul_ok == (int)fits, "mul_ok %s * %s: got %d", A, B, o.mul_ok);
+        if (o.mul_ok)
             st.check(equals(&o.mul, x), "mul %s * %s: got %s want %s", A, B, hex(&o.mul).c_str(), hex(x).c_str());
-        }
 
         st.check(o.div_ok == !BN_is_zero(b), "div_ok %s / %s: got %d", A, B, o.div_ok);
         if (o.div_ok) {
