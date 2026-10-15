@@ -1,5 +1,5 @@
 /*
- * hash.cuh - SHA-256 (FIPS 180-4) and HMAC-SHA256 (RFC 2104).
+ * hash.cuh - SHA-256 and SHA-512 (FIPS 180-4) with HMAC (RFC 2104).
  *
  * Plain __host__ __device__ code with no dynamic memory, so the same
  * functions run in a GPU thread and on the CPU. The streaming interface
@@ -184,8 +184,8 @@ HASH_HD void sha256_final(sha256_ctx_t *c, uint8_t out[SHA256_DIGEST_SIZE])
         have = 0;
     }
     memset(c->buf + have, 0, SHA256_BLOCK_SIZE - 8 - have);
-    for (int i = 0; i < 8; i++)
-        c->buf[SHA256_BLOCK_SIZE - 1 - i] = (uint8_t)(bits >> (8 * i));
+    sha256_store_be32(c->buf + SHA256_BLOCK_SIZE - 8, (uint32_t)(bits >> 32));
+    sha256_store_be32(c->buf + SHA256_BLOCK_SIZE - 4, (uint32_t)bits);
     sha256_block(c->h, c->buf);
 
     for (int i = 0; i < 8; i++)
@@ -254,6 +254,230 @@ HASH_HD void hmac_sha256(const uint8_t *key, size_t key_len, const uint8_t *data
     hmac_sha256_init(&c, key, key_len);
     hmac_sha256_update(&c, data, len);
     hmac_sha256_final(&c, out);
+}
+
+/* ====================================================================== */
+/* SHA-512 and HMAC-SHA512: the same construction with 64-bit words,      */
+/* 128-byte blocks, 80 rounds and a 128-bit length field.                 */
+/* ====================================================================== */
+
+#define SHA512_BLOCK_SIZE 128
+#define SHA512_DIGEST_SIZE 64
+
+typedef struct {
+    uint64_t h[8];
+    uint8_t buf[SHA512_BLOCK_SIZE];
+    uint64_t len;
+} sha512_ctx_t;
+
+#define SHA512_K_VALUES                                                                   \
+    0x428a2f98d728ae22, 0x7137449123ef65cd, 0xb5c0fbcfec4d3b2f, 0xe9b5dba58189dbbc,       \
+    0x3956c25bf348b538, 0x59f111f1b605d019, 0x923f82a4af194f9b, 0xab1c5ed5da6d8118,       \
+    0xd807aa98a3030242, 0x12835b0145706fbe, 0x243185be4ee4b28c, 0x550c7dc3d5ffb4e2,       \
+    0x72be5d74f27b896f, 0x80deb1fe3b1696b1, 0x9bdc06a725c71235, 0xc19bf174cf692694,       \
+    0xe49b69c19ef14ad2, 0xefbe4786384f25e3, 0x0fc19dc68b8cd5b5, 0x240ca1cc77ac9c65,       \
+    0x2de92c6f592b0275, 0x4a7484aa6ea6e483, 0x5cb0a9dcbd41fbd4, 0x76f988da831153b5,       \
+    0x983e5152ee66dfab, 0xa831c66d2db43210, 0xb00327c898fb213f, 0xbf597fc7beef0ee4,       \
+    0xc6e00bf33da88fc2, 0xd5a79147930aa725, 0x06ca6351e003826f, 0x142929670a0e6e70,       \
+    0x27b70a8546d22ffc, 0x2e1b21385c26c926, 0x4d2c6dfc5ac42aed, 0x53380d139d95b3df,       \
+    0x650a73548baf63de, 0x766a0abb3c77b2a8, 0x81c2c92e47edaee6, 0x92722c851482353b,       \
+    0xa2bfe8a14cf10364, 0xa81a664bbc423001, 0xc24b8b70d0f89791, 0xc76c51a30654be30,       \
+    0xd192e819d6ef5218, 0xd69906245565a910, 0xf40e35855771202a, 0x106aa07032bbd1b8,       \
+    0x19a4c116b8d2d0c8, 0x1e376c085141ab53, 0x2748774cdf8eeb99, 0x34b0bcb5e19b48a8,       \
+    0x391c0cb3c5c95a63, 0x4ed8aa4ae3418acb, 0x5b9cca4f7763e373, 0x682e6ff3d6b2b8a3,       \
+    0x748f82ee5defb2fc, 0x78a5636f43172f60, 0x84c87814a1f0ab72, 0x8cc702081a6439ec,       \
+    0x90befffa23631e28, 0xa4506cebde82bde9, 0xbef9a3f7b2c67915, 0xc67178f2e372532b,       \
+    0xca273eceea26619c, 0xd186b8c721c0c207, 0xeada7dd6cde0eb1e, 0xf57d4f7fee6ed178,       \
+    0x06f067aa72176fba, 0x0a637dc5a2c898a6, 0x113f9804bef90dae, 0x1b710b35131c471b,       \
+    0x28db77f523047d84, 0x32caab7b40c72493, 0x3c9ebe0a15c9bebc, 0x431d67c49c100d4c,       \
+    0x4cc5d4becb3e42b6, 0x597f299cfc657e2a, 0x5fcb6fab3ad6faec, 0x6c44198c4a475817
+
+static const uint64_t sha512_k_host[80] = { SHA512_K_VALUES };
+static __constant__ uint64_t sha512_k_device[80] = { SHA512_K_VALUES };
+
+#if defined(__CUDA_ARCH__)
+#define SHA512_K sha512_k_device
+#else
+#define SHA512_K sha512_k_host
+#endif
+
+HASH_HD uint64_t sha512_rotr(uint64_t x, int n)
+{
+    return (x >> n) | (x << (64 - n));
+}
+
+HASH_HD uint64_t sha512_load_be64(const uint8_t *p)
+{
+    return (uint64_t)sha256_load_be32(p) << 32 | sha256_load_be32(p + 4);
+}
+
+HASH_HD void sha512_store_be64(uint8_t *p, uint64_t x)
+{
+    sha256_store_be32(p, (uint32_t)(x >> 32));
+    sha256_store_be32(p + 4, (uint32_t)x);
+}
+
+/* Absorb one 128-byte block into h. */
+HASH_HD void sha512_block(uint64_t h[8], const uint8_t block[SHA512_BLOCK_SIZE])
+{
+    uint64_t w[16];
+    uint64_t a = h[0], b = h[1], c = h[2], d = h[3];
+    uint64_t e = h[4], f = h[5], g = h[6], hh = h[7];
+
+#pragma unroll
+    for (int i = 0; i < 80; i++) {
+        uint64_t wi;
+        if (i < 16) {
+            wi = sha512_load_be64(block + 8 * i);
+        } else {
+            uint64_t w2 = w[(i - 2) & 15], w15 = w[(i - 15) & 15];
+            uint64_t s0 = sha512_rotr(w15, 1) ^ sha512_rotr(w15, 8) ^ (w15 >> 7);
+            uint64_t s1 = sha512_rotr(w2, 19) ^ sha512_rotr(w2, 61) ^ (w2 >> 6);
+            wi = s1 + w[(i - 7) & 15] + s0 + w[(i - 16) & 15];
+        }
+        w[i & 15] = wi;
+
+        uint64_t S1 = sha512_rotr(e, 14) ^ sha512_rotr(e, 18) ^ sha512_rotr(e, 41);
+        uint64_t ch = (e & f) ^ (~e & g);
+        uint64_t t1 = hh + S1 + ch + SHA512_K[i] + wi;
+        uint64_t S0 = sha512_rotr(a, 28) ^ sha512_rotr(a, 34) ^ sha512_rotr(a, 39);
+        uint64_t maj = (a & b) ^ (a & c) ^ (b & c);
+        uint64_t t2 = S0 + maj;
+
+        hh = g;
+        g = f;
+        f = e;
+        e = d + t1;
+        d = c;
+        c = b;
+        b = a;
+        a = t1 + t2;
+    }
+
+    h[0] += a;
+    h[1] += b;
+    h[2] += c;
+    h[3] += d;
+    h[4] += e;
+    h[5] += f;
+    h[6] += g;
+    h[7] += hh;
+}
+
+HASH_HD void sha512_init(sha512_ctx_t *c)
+{
+    c->h[0] = 0x6a09e667f3bcc908;
+    c->h[1] = 0xbb67ae8584caa73b;
+    c->h[2] = 0x3c6ef372fe94f82b;
+    c->h[3] = 0xa54ff53a5f1d36f1;
+    c->h[4] = 0x510e527fade682d1;
+    c->h[5] = 0x9b05688c2b3e6c1f;
+    c->h[6] = 0x1f83d9abfb41bd6b;
+    c->h[7] = 0x5be0cd19137e2179;
+    c->len = 0;
+}
+
+HASH_HD void sha512_update(sha512_ctx_t *c, const uint8_t *data, size_t len)
+{
+    size_t have = (size_t)(c->len % SHA512_BLOCK_SIZE);
+    c->len += len;
+
+    if (have) {
+        size_t need = SHA512_BLOCK_SIZE - have;
+        if (len < need) {
+            memcpy(c->buf + have, data, len);
+            return;
+        }
+        memcpy(c->buf + have, data, need);
+        sha512_block(c->h, c->buf);
+        data += need;
+        len -= need;
+    }
+
+    while (len >= SHA512_BLOCK_SIZE) {
+        sha512_block(c->h, data);
+        data += SHA512_BLOCK_SIZE;
+        len -= SHA512_BLOCK_SIZE;
+    }
+
+    if (len)
+        memcpy(c->buf, data, len);
+}
+
+HASH_HD void sha512_final(sha512_ctx_t *c, uint8_t out[SHA512_DIGEST_SIZE])
+{
+    size_t have = (size_t)(c->len % SHA512_BLOCK_SIZE);
+
+    /* Padding: 0x80, zeros, then the length in bits as 16 big-endian bytes. */
+    c->buf[have++] = 0x80;
+    if (have > SHA512_BLOCK_SIZE - 16) {
+        memset(c->buf + have, 0, SHA512_BLOCK_SIZE - have);
+        sha512_block(c->h, c->buf);
+        have = 0;
+    }
+    memset(c->buf + have, 0, SHA512_BLOCK_SIZE - 16 - have);
+    sha512_store_be64(c->buf + SHA512_BLOCK_SIZE - 16, c->len >> 61);
+    sha512_store_be64(c->buf + SHA512_BLOCK_SIZE - 8, c->len << 3);
+    sha512_block(c->h, c->buf);
+
+    for (int i = 0; i < 8; i++)
+        sha512_store_be64(out + 8 * i, c->h[i]);
+}
+
+HASH_HD void sha512(const uint8_t *data, size_t len, uint8_t out[SHA512_DIGEST_SIZE])
+{
+    sha512_ctx_t c;
+    sha512_init(&c);
+    sha512_update(&c, data, len);
+    sha512_final(&c, out);
+}
+
+typedef struct {
+    sha512_ctx_t inner;
+    sha512_ctx_t outer;
+} hmac_sha512_ctx_t;
+
+HASH_HD void hmac_sha512_init(hmac_sha512_ctx_t *c, const uint8_t *key, size_t key_len)
+{
+    uint8_t pad[SHA512_BLOCK_SIZE];
+
+    memset(pad, 0, sizeof(pad));
+    if (key_len > SHA512_BLOCK_SIZE)
+        sha512(key, key_len, pad);
+    else
+        memcpy(pad, key, key_len);
+
+    for (int i = 0; i < SHA512_BLOCK_SIZE; i++)
+        pad[i] ^= 0x36;
+    sha512_init(&c->inner);
+    sha512_update(&c->inner, pad, sizeof(pad));
+
+    for (int i = 0; i < SHA512_BLOCK_SIZE; i++)
+        pad[i] ^= 0x36 ^ 0x5c;
+    sha512_init(&c->outer);
+    sha512_update(&c->outer, pad, sizeof(pad));
+}
+
+HASH_HD void hmac_sha512_update(hmac_sha512_ctx_t *c, const uint8_t *data, size_t len)
+{
+    sha512_update(&c->inner, data, len);
+}
+
+HASH_HD void hmac_sha512_final(hmac_sha512_ctx_t *c, uint8_t out[SHA512_DIGEST_SIZE])
+{
+    uint8_t inner_hash[SHA512_DIGEST_SIZE];
+    sha512_final(&c->inner, inner_hash);
+    sha512_update(&c->outer, inner_hash, sizeof(inner_hash));
+    sha512_final(&c->outer, out);
+}
+
+HASH_HD void hmac_sha512(const uint8_t *key, size_t key_len, const uint8_t *data, size_t len,
+                         uint8_t out[SHA512_DIGEST_SIZE])
+{
+    hmac_sha512_ctx_t c;
+    hmac_sha512_init(&c, key, key_len);
+    hmac_sha512_update(&c, data, len);
+    hmac_sha512_final(&c, out);
 }
 
 #endif

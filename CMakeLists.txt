@@ -1,9 +1,15 @@
 cmake_minimum_required(VERSION 3.18)
-project(cuda_secp256k1 LANGUAGES CXX CUDA)
 
 # Pick the GPU architecture: -DCMAKE_CUDA_ARCHITECTURES=86 for an RTX 30xx, 80 for A100, ...
+# This must come before project(), which otherwise applies CMake's own default (52).
 if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
     set(CMAKE_CUDA_ARCHITECTURES 89)
+endif()
+project(cuda_secp256k1 LANGUAGES CXX CUDA)
+
+if(CMAKE_CUDA_COMPILER_VERSION VERSION_LESS 12.0)
+    message(FATAL_ERROR "CUDA 12 or newer is required, found ${CMAKE_CUDA_COMPILER_VERSION} at ${CMAKE_CUDA_COMPILER}. "
+                        "Point CMake at a newer toolkit with -DCMAKE_CUDA_COMPILER=/usr/local/cuda/bin/nvcc.")
 endif()
 
 set(CMAKE_CXX_STANDARD 17)

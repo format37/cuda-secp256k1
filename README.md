@@ -5,8 +5,8 @@ with every operation checked against OpenSSL.
 
 It gives a GPU thread what it needs to do public-key math on its own:
 256-bit integers in registers, Montgomery multiplication, Jacobian point
-addition and doubling, a Montgomery-ladder scalar multiplication, and SHA-256
-with HMAC for the key-derivation steps around them. All of
+addition and doubling, a Montgomery-ladder scalar multiplication, and SHA-256,
+SHA-512 and HMAC for the key-derivation steps around them. All of
 it is plain `__host__ __device__` code, so the same functions run and can be
 debugged on the CPU.
 
@@ -57,20 +57,27 @@ cudaMemcpyToSymbol(c_group, &g, sizeof(g));
 | `bn.cuh` | `bn_t`; `bn_add`, `bn_sub`, `bn_mul`, `bn_div` (Knuth D), `bn_mod`, `bn_nnmod`, shifts, `bn_cmp`, `bn_mod_inverse` (extended Euclid), the `*_quick` modular helpers, `bn_consttime_swap`, hex and byte conversion |
 | `mont.cuh` | `bn_mont_t` context (`bn_mont_init`), `bn_mont_mul`, `bn_to_mont`, `bn_from_mont`, `bn_mont_exp`, `bn_mod_exp_mont` |
 | `ec.cuh` | `ec_group_t` (`ec_group_init_secp256k1`, or `ec_group_init` for another short-Weierstrass curve with cofactor 1), field helpers `fe_*`, `ec_point_t` (Jacobian, Montgomery form) and `ec_affine_t`, `ec_point_add`, `ec_point_dbl`, `ec_point_mul` (ladder), `ec_point_mul_vartime` (double-and-add), `ec_point_to_affine`, `ec_pubkey_create`, `ec_affine_to_bytes`, `ec_affine_is_on_curve` |
-| `hash.cuh` | `sha256_ctx_t` with `sha256_init` / `sha256_update` / `sha256_final`, one-shot `sha256`; `hmac_sha256_ctx_t` with `hmac_sha256_init` / `_update` / `_final`, one-shot `hmac_sha256` |
+| `hash.cuh` | SHA-256 and SHA-512, streaming (`sha256_init` / `sha256_update` / `sha256_final`, likewise `sha512_*`) and one-shot (`sha256`, `sha512`); HMAC for both (`hmac_sha256_init` / `_update` / `_final`, `hmac_sha256`, likewise `hmac_sha512_*`) |
 
 Every function is safe to call with the result aliasing an input.
 
 ## Build and test
 
-Requirements: CUDA 12 (tested with 12.5), CMake 3.18+, and OpenSSL
-development headers for the tests (they link `libcrypto`).
+Requirements: CUDA 12 or newer (tested with 12.5), CMake 3.18+, and OpenSSL
+development headers for the tests (they link `libcrypto`). CMake refuses
+older toolkits: CUDA 11.5 cannot target recent GPUs, and in our tests its
+optimizer produced wrong HMAC-SHA512 digests for some inputs.
 
 ```sh
 cmake -B build -DCMAKE_CUDA_ARCHITECTURES=89   # 89 = RTX 40xx, 86 = RTX 30xx, 80 = A100
 cmake --build build -j
 cd build && ctest --output-on-failure
 ```
+
+If a distribution package installed an older `nvcc` in `/usr/bin`, CMake may
+pick it over the one on your `PATH`. Add
+`-DCMAKE_CUDA_COMPILER=/usr/local/cuda/bin/nvcc` to the first command; the
+configure output names the compiler it found.
 
 The tests run each operation on the GPU over a batch of inputs and compare
 every result with OpenSSL on the host:
@@ -89,10 +96,11 @@ every result with OpenSSL on the host:
   one projective, both projective, equal points, inverse points, infinity);
   public-key derivation and compressed encoding, all against
   `EC_POINT_mul` / `EC_POINT_add` / `EC_POINT_point2oct`.
-- `test_hash`: SHA-256 and HMAC-SHA256 for every message length from 0 to 321
-  bytes and random lengths up to 1 KiB, each computed one-shot, split across
-  two updates and one byte at a time, with keys from empty to longer than a
-  block, on both GPU and host, against `SHA256()` / `HMAC()`.
+- `test_hash`: SHA-256, SHA-512 and both HMACs for every message length from
+  0 to 400 bytes and random lengths up to 1 KiB, each computed one-shot, split
+  across two updates and one byte at a time, with keys from empty to longer
+  than a block, on both GPU and host, against `SHA256()` / `SHA512()` /
+  `HMAC()`.
 
 `CUDA_SECP256K1_N` sets the batch size (default 4096) and
 `CUDA_SECP256K1_SEED` the random seed, so a failing input can be reproduced.
@@ -104,8 +112,8 @@ every result with OpenSSL on the host:
 
 | Method | keys / s |
 |---|---|
-| `ec_point_mul` (Montgomery ladder) | ~485 000 |
-| `ec_point_mul_vartime` (double-and-add) | ~380 000 |
+| `ec_point_mul` (Montgomery ladder) | ~480 000 |
+| `ec_point_mul_vartime` (double-and-add) | ~375 000 |
 
 The arithmetic is generic multi-precision code (64-bit limbs, `__int128`
 products), not a hand-tuned secp256k1 field implementation, so there is room
