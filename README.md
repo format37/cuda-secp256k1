@@ -6,7 +6,7 @@ with every operation checked against OpenSSL.
 It gives a GPU thread what it needs to do public-key math on its own:
 256-bit integers in registers, Montgomery multiplication, Jacobian point
 addition and doubling, a Montgomery-ladder scalar multiplication, and SHA-256,
-SHA-512 and HMAC for the key-derivation steps around them. All of
+SHA-512, HMAC and PBKDF2 for the key-derivation steps around them. All of
 it is plain `__host__ __device__` code, so the same functions run and can be
 debugged on the CPU.
 
@@ -58,6 +58,7 @@ cudaMemcpyToSymbol(c_group, &g, sizeof(g));
 | `mont.cuh` | `bn_mont_t` context (`bn_mont_init`), `bn_mont_mul`, `bn_to_mont`, `bn_from_mont`, `bn_mont_exp`, `bn_mod_exp_mont` |
 | `ec.cuh` | `ec_group_t` (`ec_group_init_secp256k1`, or `ec_group_init` for another short-Weierstrass curve with cofactor 1), field helpers `fe_*`, `ec_point_t` (Jacobian, Montgomery form) and `ec_affine_t`, `ec_point_add`, `ec_point_dbl`, `ec_point_mul` (ladder), `ec_point_mul_vartime` (double-and-add), `ec_point_to_affine`, `ec_pubkey_create`, `ec_affine_to_bytes`, `ec_affine_is_on_curve` |
 | `hash.cuh` | SHA-256 and SHA-512, streaming (`sha256_init` / `sha256_update` / `sha256_final`, likewise `sha512_*`) and one-shot (`sha256`, `sha512`); HMAC for both (`hmac_sha256_init` / `_update` / `_final`, `hmac_sha256`, likewise `hmac_sha512_*`) |
+| `kdf.cuh` | `pbkdf2_hmac_sha256`, `pbkdf2_hmac_sha512` (RFC 8018, any output length) |
 
 Every function is safe to call with the result aliasing an input.
 
@@ -101,6 +102,9 @@ every result with OpenSSL on the host:
   across two updates and one byte at a time, with keys from empty to longer
   than a block, on both GPU and host, against `SHA256()` / `SHA512()` /
   `HMAC()`.
+- `test_pbkdf2`: PBKDF2 over both HMACs for password and salt lengths from
+  empty to longer than a block, output lengths from 1 to 160 bytes and 1 to
+  4096 iterations, on GPU and host, against `PKCS5_PBKDF2_HMAC()`.
 
 `CUDA_SECP256K1_N` sets the batch size (default 4096) and
 `CUDA_SECP256K1_SEED` the random seed, so a failing input can be reproduced.
